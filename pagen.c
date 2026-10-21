@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include <ctype.h>
 #include <errno.h>
 #include <getopt.h>
 #include <stdio.h>
@@ -7,16 +8,49 @@
 
 #define VERSION "0"
 
-static struct option const opts[] =
+static const struct option opts[] =
 {
 	{ "help"   , no_argument, NULL, -2 },
 	{ "version", no_argument, NULL, -3 },
 	{ NULL     , 0          , NULL, 0  },
 };
 
-static void replace_special_chars(const char* s)
+struct tag
 {
-	for(; *s; s++)
+	const char* delim;
+	const char* open;
+	const char* close;
+};
+
+static const struct tag blocks[] =
+{
+	{ "###### ", "<h6>", "</h6>" },
+	{ "##### " , "<h5>", "</h5>" },
+	{ "#### "  , "<h4>", "</h4>" },
+	{ "### "   , "<h3>", "</h3>" },
+	{ "## "    , "<h2>", "</h2>" },
+	{ "# "     , "<h1>", "</h1>" },
+	{ "- "     , "<li>", "</li>" },
+	{ ""       , "<p>" , "</p>"  },
+};
+
+static const struct tag spans[] =
+{
+	{ "***", "<b><i>", "</i></b>" },
+	{ "**" , "<b>"   , "</b>"     },
+	{ "__" , "<b>"   , "</b>"     },
+	{ "*"  , "<i>"   , "</i>"     },
+	{ "_"  , "<i>"   , "</i>"     },
+	{ "~~" , "<del>" , "</del>"   },
+	{ NULL , NULL    , NULL       },
+};
+
+// TODO: APPLY STYLE IMPLEMENTATION
+// static void apply_style();
+
+static void replace_special_chars(const char* s, const char* end)
+{
+	for(; s < end; s++)
 	{
 		switch(*s)
 		{
@@ -29,47 +63,145 @@ static void replace_special_chars(const char* s)
 			case '>':
 				fputs("&gt;", stdout);
 				break;
+			case '"':
+				fputs("&quot;", stdout);
+				break;
+			case '\'':
+				fputs("&apos;", stdout);
+				break;
 			default:
 				putchar(*s);
 		}
 	}
 }
 
-static void tag(const char* open, const char* text, const char* close)
+static const char* find(const char* s, const char* end, const char* pat)
 {
-	fputs(open, stdout);
-	replace_special_chars(text);
-	puts(close);
+	size_t n = strlen(pat);
+
+	for(; s + n <= end; s++)
+		if(!memcmp(s, pat, n))
+			return s;
+
+	return NULL;
 }
 
-static FILE* read_source(const char* path)
+static void inline_markdown(const char* s, const char* end)
 {
-	FILE* file;
+	const char* start = s;
+	const char *e, *mid = NULL, *url_end, *title;
+	const struct tag* sp;
+	size_t n;
+	int img;
 
-	if(!strcmp(path, "-"))
-		return stdin;
+	while(s< end)
+	{
+		if(*s == '\\' && s + 1 < end)
+		{
+			replace_special_chars(s + 1, s + 2);
+			s += 2;
+			continue;
+		}
 
-	file = fopen(path, "r");
-	if(!file)
-		fprintf(stderr, "[pagen]: cannot open file '%s': %s\n", path,
-			strerror(errno));
+		if(*s == '\\' || (end - s == 2 && !strncmp(s, "  ", 2)))
+		{
+			fputs("<br>", stdout);
+			break;
+		}
 
-	return file;
+		if(*s == '`' && (e = find(s + 1, end, "`")) && e > s + 1)
+		{
+			fputs("<code>", stdout);
+			replace_special_chars(s + 1, e);
+			fputs("</code>", stdout);
+			s = e + 1;
+			continue;
+		}
+
+		img = !strncmp(s, "![", 2);
+		if((img || *s == '[') && (mid = find(s + 1 + img, end, "](")) && (e = find(mid + 2, end, ")")))
+		{
+			url_end = e;
+			title = find(mid + 2, e, " \"");
+			if(title && e[-1] == '"')
+				url_end = title;
+			else
+				title = NULL;
+
+			fputs(img ? "<img src=\"" : "<a href=\"", stdout);
+			replace_special_chars(mid + 2, url_end);
+			if(title)
+			{
+				fputs("\" title=\"", stdout);
+				replace_special_chars(title + 2, e - 1);
+			}
+
+			if(img)
+			{
+				fputs("\" alt=\"", stdout);
+				replace_special_chars(s + 2, mid);
+				fputs("\">", stdout);
+			}
+			else
+			{
+				fputs("\">", stdout);
+				inline_markdown(s + 1, mid);
+				fputs("</a>", stdout);
+			}
+
+			s = e + 1;
+			continue;
+		}
+
+		for(sp = spans; sp->delim; sp++)
+		{
+			n = strlen(sp->delim);
+
+			if(strncmp(s, sp->delim, n) || s + n >= end || isspace((unsigned char)s[n]))
+				continue;
+
+			if(*s == '_' && s > start && isalnum((unsigned char)s[-1]))
+				continue;
+
+			e = find(s + n, end, sp->delim);
+			if(!e || e == s + n)
+				continue;
+
+			fputs(sp->open, stdout);
+			inline_markdown(s + n, e);
+			fputs(sp->close, stdout);
+			s = e + n;
+			break;
+		}
+		if(sp->delim)
+			continue;
+
+		replace_special_chars(s, s + 1);
+		s++;
+	}
 }
 
 static int convert_markdown(FILE* page)
 {
 	char* line = NULL;
+	char* end;
 	size_t cap = 0;
-	ssize_t len;
-	int ul = 0;
+	const struct tag* b;
+	int item, ul = 0;
 
-	puts("<html>\n<head></head>\n<body>");
-	while((len = getline(&line, &cap, page)) != -1)
+	puts("<html>\n<head>");
+	// TODO: GIVE HEAD
+	puts("</head>\n<body>");
+	while(getline(&line, &cap, page) != -1)
 	{
-		line[strcspn(line, "\r\n")] = '\0';
+		end = line + strcspn(line, "\r\n");
+		*end = '\0';
 
-		int item = !strncmp(line, "- ", 2);
+		b = blocks;
+		while(strncmp(line, b->delim, strlen(b->delim)))
+			b++;
+
+		item = !strcmp(b->open, "<li>");
 		if(ul && !item)
 		{
 			puts("</ul>");
@@ -81,18 +213,12 @@ static int convert_markdown(FILE* page)
 			ul = 1;
 		}
 
-		if(!*line)
+		if(end == line)
 			continue;
-		else if(!strncmp(line, "### ", 4))
-			tag("<h3>", line + 4, "</h3>");
-		else if(!strncmp(line, "## ", 3))
-			tag("<h2>", line + 3, "</h2>");
-		else if(!strncmp(line, "# ", 2))
-			tag("<h1>", line + 2, "</h1>");
-		else if(item)
-			tag("<li>", line + 2, "</li>");
-		else
-			tag("<p>", line, "</p>");
+
+		fputs(b->open, stdout);
+		inline_markdown(line + strlen(b->delim), end);
+		puts(b->close);
 	}
 	free(line);
 
@@ -121,14 +247,9 @@ static void usage(FILE* out, const char* prog)
 		prog, prog);
 }
 
-void version(char* prog, char* ver)
-{
-	printf("%s %s, by rax/rxsxyy\n", prog, ver);
-}
-
 int main(int argc, char** argv)
 {
-	FILE* page;
+	FILE* page = stdin;
 	int c, ret;
 
 	while((c = getopt_long(argc, argv, "", opts, NULL)) != -1)
@@ -139,7 +260,7 @@ int main(int argc, char** argv)
 				usage(stdout, argv[0]);
 				return 0;
 			case -3:
-				version(argv[0], VERSION);
+				printf("%s %s, by rax/rxsxyy\n", argv[0], VERSION);
 				return 0;
 			default:
 				usage(stdout, argv[0]);
@@ -153,9 +274,15 @@ int main(int argc, char** argv)
 		return 1;
 	}
 
-	page = read_source(optind < argc ? argv[optind] : "-");
-	if(!page)
-		return 1;
+	if(optind < argc && strcmp(argv[optind], "-"))
+	{
+		page = fopen(argv[optind], "r");
+		if(!page)
+		{
+			fprintf(stderr, "[pagen]: cannot open file '%s': %s\n", argv[optind], strerror(errno));
+			return 1;
+		}
+	}
 
 	ret = convert_markdown(page);
 
