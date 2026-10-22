@@ -241,10 +241,8 @@ static void usage(FILE* out, const char* prog)
 		"usage: %s [OPTION]... [PATH]\n"
 		"convert PATH (default or '-': stdin) to html on stdout\n"
 		"	--help       display this help and exit\n"
-		"	--version    output version information and exit\n\n"
-		"to write the output into a file you need redirect the output into one\n"
-		"	$ %s [PATH] > file.html\n",
-		prog, prog);
+		"	--version    output version information and exit\n",
+		prog);
 }
 
 int main(int argc, char** argv)
