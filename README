@@ -4,7 +4,11 @@ pagen is a VERY small and VERY minimal markdown to html converter written in C
 
 ## building
 
-` $ cc -Wall -Wextra pagen.c -o pagen `
+` $ cc -std=c99 -Wall -Wextra pagen.c -o pagen `
+
+or
+
+` $ make `
 
 ## usage
 
