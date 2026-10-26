@@ -7,7 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#define VERSION "0"
+#define VERSION "1"
 
 static const struct option opts[] =
 {
