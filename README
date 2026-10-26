@@ -18,7 +18,7 @@ there are 2 ways (?) into writing the output into files
 
 - interactive mode (redirecting terminal output into file)
 
-` $ ./pagen <<EOT> filename.html `
+` $ ./pagen <<EOF> filename.html `
 
 write the message as you go in markdown and it will be converted into html
 

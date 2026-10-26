@@ -5,14 +5,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define VERSION "0"
 
 static const struct option opts[] =
 {
-	{ "help"   , no_argument, NULL, -2 },
-	{ "version", no_argument, NULL, -3 },
-	{ NULL     , 0          , NULL, 0  },
+	{ "style"    , required_argument, NULL, 'c' },
+	{ "signature", required_argument, NULL, 'S' },
+	{ "help"     , no_argument      , NULL, -2  },
+	{ "version"  , no_argument      , NULL, -3  },
+	{ NULL       , 0                , NULL, 0   },
 };
 
 struct tag
@@ -30,13 +33,13 @@ static const struct tag blocks[] =
 	{ "### "   , "<h3>", "</h3>" },
 	{ "## "    , "<h2>", "</h2>" },
 	{ "# "     , "<h1>", "</h1>" },
-	{ "- "     , "<li>", "</li>" },
 	{ ""       , "<p>" , "</p>"  },
 };
 
 static const struct tag spans[] =
 {
 	{ "***", "<b><i>", "</i></b>" },
+	{ "___", "<b><i>", "</i></b>" },
 	{ "**" , "<b>"   , "</b>"     },
 	{ "__" , "<b>"   , "</b>"     },
 	{ "*"  , "<i>"   , "</i>"     },
@@ -45,8 +48,15 @@ static const struct tag spans[] =
 	{ NULL , NULL    , NULL       },
 };
 
-// TODO: APPLY STYLE IMPLEMENTATION
-// static void apply_style();
+static void apply_style(FILE* css)
+{
+	int c;
+
+	puts("<style>");
+	while((c = getc(css)) != EOF)
+		putchar(c);
+	puts("</style>");
+}
 
 static void replace_special_chars(const char* s, const char* end)
 {
@@ -181,49 +191,106 @@ static void inline_markdown(const char* s, const char* end)
 	}
 }
 
-static int convert_markdown(FILE* page)
+static size_t list_marker(const char* s)
 {
-	char* line = NULL;
-	char* end;
-	size_t cap = 0;
+	size_t n = strspn(s, "0123456789");
+
+	if(!strncmp(s, "- ", 2))
+		return 2;
+
+	if(n && !strncmp(s + n, ". ", 2))
+		return n + 2;
+
+	return 0;
+}
+
+static int convert_markdown(FILE* page, FILE* style, const char* signature)
+{
+	char *line = NULL, *next = NULL, *tmp, *end;
+	size_t cap = 0, next_cap = 0, tmp_cap, m;
+	const char *list = NULL, *kind;
 	const struct tag* b;
-	int item, ul = 0;
+	int ahead = 0, next_item, interactive = isatty(fileno(page));
 
 	puts("<html>\n<head>");
-	// TODO: GIVE HEAD
+
+	if(style)
+		apply_style(style);
 	puts("</head>\n<body>");
-	while(getline(&line, &cap, page) != -1)
+	for(;;)
 	{
+		if(ahead)
+		{
+			tmp = line;
+			line = next;
+			next = tmp;
+			tmp_cap = cap;
+			cap = next_cap;
+			next_cap = tmp_cap;
+		}
+		else if(getline(&line, &cap, page) == -1)
+			break;
+
 		end = line + strcspn(line, "\r\n");
 		*end = '\0';
 
-		b = blocks;
-		while(strncmp(line, b->delim, strlen(b->delim)))
-			b++;
+		m = list_marker(line);
+		kind = *line == '-' ? "ul" : "ol";
 
-		item = !strcmp(b->open, "<li>");
-		if(ul && !item)
+		ahead = 0;
+		next_item = 1;
+		if(!interactive)
 		{
-			puts("</ul>");
-			ul = 0;
+			ahead = getline(&next, &next_cap, page) != -1;
+			next_item = ahead && list_marker(next) && (*next == '-') == (*line == '-');
 		}
-		if(item && !ul)
+
+		if(list && (!m || strcmp(kind, list)))
 		{
-			puts("<ul>");
-			ul = 1;
+			printf("</%s>\n", list);
+			list = NULL;
+		}
+		if(m && !list && next_item)
+		{
+			printf("<%s>\n", kind);
+			list = kind;
+		}
+		if(!strcmp(line, "---"))
+		{
+			puts("<hr>");
+			continue;
 		}
 
 		if(end == line)
 			continue;
+
+		if(m)
+		{
+			fputs("<li>", stdout);
+			inline_markdown(line + m, end);
+			puts("</li>");
+			continue;
+		}
+
+		b = blocks;
+		while(strncmp(line, b->delim, strlen(b->delim)))
+			b++;
 
 		fputs(b->open, stdout);
 		inline_markdown(line + strlen(b->delim), end);
 		puts(b->close);
 	}
 	free(line);
+	free(next);
 
-	if(ul)
-		puts("</ul>");
+	if(list)
+		printf("</%s>\n", list);
+	if(signature)
+	{
+		fputs("<footer>\n<p>", stdout);
+		replace_special_chars(signature, signature + strlen(signature));
+		puts("</p>\n</footer>");
+	}
 	puts("</body>\n</html>");
 
 	if(ferror(page))
@@ -240,17 +307,20 @@ static void usage(FILE* out, const char* prog)
 	fprintf(out,
 		"usage: %s [OPTION]... [PATH]\n"
 		"convert PATH (default or '-': stdin) to html on stdout\n"
-		"	--help       display this help and exit\n"
-		"	--version    output version information and exit\n",
+		"	-c, --style        writes css style to page\n"
+		"	-S, --signature    writes message on page footer\n"
+		"	--help             display this help and exit\n"
+		"	--version          output version information and exit\n",
 		prog);
 }
 
 int main(int argc, char** argv)
 {
-	FILE* page = stdin;
+	FILE* page = stdin, *style = NULL;
 	int c, ret;
+	char *style_path = NULL, *signature = NULL;
 
-	while((c = getopt_long(argc, argv, "", opts, NULL)) != -1)
+	while((c = getopt_long(argc, argv, "c:S:", opts, NULL)) != -1)
 	{
 		switch(c)
 		{
@@ -260,6 +330,12 @@ int main(int argc, char** argv)
 			case -3:
 				printf("%s %s, by rax/rxsxyy\n", argv[0], VERSION);
 				return 0;
+			case 'c':
+				style_path = optarg;
+				break;
+			case 'S':
+				signature = optarg;
+				break;
 			default:
 				usage(stdout, argv[0]);
 				return 1;
@@ -272,6 +348,16 @@ int main(int argc, char** argv)
 		return 1;
 	}
 
+	if(style_path)
+	{
+		style = fopen(style_path, "r");
+		if(!style)
+		{
+			fprintf(stderr, "[pagen]: cannot open style file '%s': %s\n", style_path, strerror(errno));
+			return 1;
+		}
+	}
+
 	if(optind < argc && strcmp(argv[optind], "-"))
 	{
 		page = fopen(argv[optind], "r");
@@ -282,7 +368,7 @@ int main(int argc, char** argv)
 		}
 	}
 
-	ret = convert_markdown(page);
+	ret = convert_markdown(page, style, signature);
 
 	if(page != stdin)
 		fclose(page);
