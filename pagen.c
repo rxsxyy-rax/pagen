@@ -13,7 +13,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define VERSION "1"
+#define VERSION "2"
 
 static const struct option opts[] =
 {
