@@ -71,7 +71,8 @@ static int process_file(const char* path, const char* style_path, const char* si
 static int render(FILE* page, FILE* out);
 static void usage(const char* prog, FILE* out);
 static void version(const char* prog);
-static int walk_directory(const char* dir_path, int recursive, const char* style_path, const char* signature, const char* title, int verbose);
+static int mkdir_p(const char* path);
+static int walk_directory(const char* dir_path, const char* base_dir, int recursive, const char* style_path, const char* signature, const char* title, const char* output_dir, int verbose);
 
 static void apply_signature(const char* signature, FILE* out)
 {
@@ -118,7 +119,7 @@ static void apply_title(const char* title, FILE* out)
 {
 	fputs("<title>", out);
 	html_putc(title, title + strlen(title), out);
-	fputs("</title>", out);
+	fputs("</title>\n", out);
 }
 
 static int convert_markdown(FILE* page, const char* style_path, const char* signature_path, const char* title, FILE* out)
@@ -140,7 +141,7 @@ static int convert_markdown(FILE* page, const char* style_path, const char* sign
 	if(signature_path)
 		apply_signature(signature_path, out);
 
-	fputs("</body>\n</html>", out);
+	fputs("</body>\n</html>\n", out);
 
 	if(ret)
 	{
@@ -155,26 +156,7 @@ static void html_putc(const char* s, const char* end, FILE* out)
 {
 	for(; s < end; s++)
 	{
-		switch(*s)
-		{
-			case '&':
-				fputs("&amp;", out);
-				break;
-			case '<':
-				fputs("&lt;", out);
-				break;
-			case '>':
-				fputs("&gt;", out);
-				break;
-			case '"':
-				fputs("&quot;", out);
-				break;
-			case '\'':
-				fputs("&apos;", out);
-				break;
-			default:
-				putc(*s, out);
-		}
+		putc(*s, out);
 	}
 }
 
@@ -392,7 +374,7 @@ static void usage(const char* prog, FILE* out)
 	fprintf(out,
 		"usage: %s [OPTION]... [PATH]\n"
 		"convert PATH (default or '-': stdin) to html\n"
-		"	-o, --output       writes html to file (default: derived from input name; required when PATH is '-')\n"
+		"	-o, --output       writes html to file or directory when --recursive is passed\n"
 		"	-r, --recursive    recursively looks for markdown files to convert to html\n"
 		"	-s, --style        writes css style to page\n"
 		"	-S, --signature    writes message or markdown file on page footer\n"
@@ -423,6 +405,34 @@ static char* derive_output_name(const char* input)
 	return out;
 }
 
+static int mkdir_p(const char* path)
+{
+	char tmp[PATH_MAX];
+	char* p = NULL;
+	size_t len;
+
+	snprintf(tmp, sizeof(tmp), "%s", path);
+	len = strlen(tmp);
+	if(len == 0) return 0;
+	if(tmp[len - 1] == '/')
+		tmp[len - 1] = 0;
+
+	for(p = tmp + 1; *p; p++)
+	{
+		if(*p == '/')
+		{
+			*p = 0;
+			if(mkdir(tmp, 0755) != 0 && errno != EEXIST)
+				return -1;
+			*p = '/';
+		}
+	}
+	if(mkdir(tmp, 0755) != 0 && errno != EEXIST)
+		return -1;
+
+	return 0;
+}
+
 static int process_file(const char* path, const char* style_path, const char* signature, const char* title, const char* output_override, int verbose)
 {
 	FILE *page, *out;
@@ -444,6 +454,24 @@ static int process_file(const char* path, const char* style_path, const char* si
 	}
 
 	out_path = output_override ? output_override : (derived = derive_output_name(path));
+
+	if(output_override)
+	{
+		char dir_tmp[PATH_MAX];
+		snprintf(dir_tmp, sizeof(dir_tmp), "%s", output_override);
+		char* last_slash = strrchr(dir_tmp, '/');
+		if(last_slash)
+		{
+			*last_slash = '\0';
+			if(mkdir_p(dir_tmp) != 0)
+			{
+				fprintf(stderr, "[pagen]: cannot create directory '%s': %s\n", dir_tmp, strerror(errno));
+				if(page != stdin) fclose(page);
+				free(derived);
+				return 1;
+			}
+		}
+	}
 
 	out = fopen(out_path, "w");
 	if(!out)
@@ -475,7 +503,7 @@ static int process_file(const char* path, const char* style_path, const char* si
 	return ret;
 }
 
-static int walk_directory(const char* dir_path, int recursive, const char* style_path, const char* signature, const char* title, int verbose)
+static int walk_directory(const char* dir_path, const char* base_dir, int recursive, const char* style_path, const char* signature, const char* title, const char* output_dir, int verbose)
 {
 	DIR* dir;
 	struct dirent* ent;
@@ -504,7 +532,7 @@ static int walk_directory(const char* dir_path, int recursive, const char* style
 		if(S_ISDIR(st.st_mode))
 		{
 			if(recursive)
-				ret |= walk_directory(path, recursive, style_path, signature, title, verbose);
+				ret |= walk_directory(path, base_dir, recursive, style_path, signature, title, output_dir, verbose);
 			continue;
 		}
 
@@ -514,7 +542,27 @@ static int walk_directory(const char* dir_path, int recursive, const char* style
 		if(!strstr(ent->d_name, ".md") && !strstr(ent->d_name, ".markdown"))
 			continue;
 
-		ret |= process_file(path, style_path, signature, title, NULL, verbose);
+		if(output_dir)
+		{
+			const char* rel_path = path;
+			size_t base_len = strlen(base_dir);
+			if(!strncmp(path, base_dir, base_len))
+			{
+				rel_path = path + base_len;
+				while(*rel_path == '/') rel_path++;
+			}
+
+			char* derived_rel = derive_output_name(rel_path);
+			char target_path[PATH_MAX];
+			snprintf(target_path, sizeof(target_path), "%s/%s", output_dir, derived_rel);
+			free(derived_rel);
+
+			ret |= process_file(path, style_path, signature, title, target_path, verbose);
+		}
+		else
+		{
+			ret |= process_file(path, style_path, signature, title, NULL, verbose);
+		}
 	}
 
 	closedir(dir);
@@ -572,16 +620,13 @@ int main(int argc, char** argv)
 
 	if(recursive)
 	{
-		if(output_path)
-			fprintf(stderr, "[pagen]: --output is ignored with --recursive\n");
-
 		if(stat(path, &st) || !S_ISDIR(st.st_mode))
 		{
 			fprintf(stderr, "[pagen]: --recursive requires PATH to be a directory\n");
 			return 1;
 		}
 
-		ret = walk_directory(path, recursive, style_path, signature, title, verbose);
+		ret = walk_directory(path, path, recursive, style_path, signature, title, output_path, verbose);
 	}
 	else
 		ret = process_file(path, style_path, signature, title, output_path, verbose);
