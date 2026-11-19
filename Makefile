@@ -2,7 +2,7 @@ CC = cc
 
 PREFIX = /usr/local
 
-CFLAGS = -std=c99 -Oz -Wall -Wextra
+CFLAGS = -std=c99 -Wall -Wextra
 
 SRC = pagen.c
 OUT = pagen

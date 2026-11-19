@@ -1,5 +1,4 @@
 #define _POSIX_C_SOURCE 200809L
-#include "pagen.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -14,6 +13,15 @@
 #include <unistd.h>
 
 #define VERSION "2.0.1"
+
+struct tag
+{
+	const char* delim;
+	const char* open;
+	const char* close;
+	// literal content
+	int raw;
+};
 
 static const struct option opts[] =
 {
@@ -48,8 +56,8 @@ static const struct tag oneliners[] =
 static const struct tag spans[] =
 {
 	{"`"  , "<code>", "</code>" , 1},
-	{"***", "<b><i>", "</b></i>", 0},
-	{"___", "<b><i>", "</b></i>", 0},
+	{"***", "<b><i>", "</i></b>", 0},
+	{"___", "<b><i>", "</i></b>", 0},
 	{"**" , "<b>"   , "</b>"    , 0},
 	{"__" , "<b>"   , "</b>"    , 0},
 	{"*"  , "<i>"   , "</i>"    , 0},
@@ -71,6 +79,7 @@ static int process_file(const char* path, const char* style_path, const char* si
 static int render(FILE* page, FILE* out);
 static void usage(const char* prog, FILE* out);
 static void version(const char* prog);
+static int has_suffix(const char* s, const char* suffix);
 static int mkdir_p(const char* path);
 static int walk_directory(const char* dir_path, const char* base_dir, int recursive, const char* style_path, const char* signature, const char* title, const char* output_dir, int verbose);
 
@@ -126,7 +135,7 @@ static int convert_markdown(FILE* page, const char* style_path, const char* sign
 {
 	int ret = 0;
 
-	fputs("<html>\n<head>\n", out);
+	fputs("<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n", out);
 
 	if(title)
 		apply_title(title, out);
@@ -275,28 +284,24 @@ static size_t list_marker(const char* s)
 
 static int render(FILE* page, FILE* out)
 {
-	char *line = NULL, *next = NULL, *tmp, *end;
-	size_t cap = 0, next_cap = 0, tmp_cap, m;
+	char *line = NULL, *end;
+	size_t cap = 0, m;
 	const char *list = NULL, *kind;
 	const struct tag* b;
-	int ahead = 0, next_item;
 
-	for(;;)
+	while(getline(&line, &cap, page) != -1)
 	{
-		if(ahead)
-		{
-			tmp = line;
-			line = next;
-			next = tmp;
-			tmp_cap = cap;
-			cap = next_cap;
-			next_cap = tmp_cap;
-		}
-		else if(getline(&line, &cap, page) == -1)
-			break;
-
 		end = line + strcspn(line, "\r\n");
 		*end = '\0';
+
+		m = list_marker(line);
+		kind = *line == '-' ? "ul" : "ol";
+
+		if(list && (!m || strcmp(kind, list)))
+		{
+			fprintf(out, "</%s>\n", list);
+			list = NULL;
+		}
 
 		if(!strncmp(line, "```", 3))
 		{
@@ -313,26 +318,9 @@ static int render(FILE* page, FILE* out)
 				putc('\n', out);
 			}
 			fputs("</code></pre>\n", out);
-			ahead = 0;
 			continue;
 		}
 
-		m = list_marker(line);
-		kind = *line == '-' ? "ul" : "ol";
-
-		ahead = getline(&next, &next_cap, page) != -1;
-		next_item = ahead && list_marker(next) && (*next == '-') == (*line == '-');
-
-		if(list && (!m || strcmp(kind, list)))
-		{
-			fprintf(out, "</%s>\n", list);
-			list = NULL;
-		}
-		if(m && !list && next_item)
-		{
-			fprintf(out, "<%s>\n", kind);
-			list = kind;
-		}
 		if(!strcmp(line, oneliners[0].delim))
 		{
 			fputs(oneliners[0].open, out);
@@ -345,6 +333,11 @@ static int render(FILE* page, FILE* out)
 
 		if(m)
 		{
+			if(!list)
+			{
+				fprintf(out, "<%s>\n", kind);
+				list = kind;
+			}
 			fputs("<li>", out);
 			inline_markdown(line + m, end, out);
 			fputs("</li>\n", out);
@@ -361,7 +354,6 @@ static int render(FILE* page, FILE* out)
 		putc('\n', out);
 	}
 	free(line);
-	free(next);
 
 	if(list)
 		fprintf(out, "</%s>\n", list);
@@ -392,7 +384,8 @@ static void version(const char* prog)
 
 static char* derive_output_name(const char* input)
 {
-	const char* dot = strrchr(input, '.');
+	const char* slash = strrchr(input, '/');
+	const char* dot = strrchr(slash ? slash + 1 : input, '.');
 	const char* base_end = dot ? dot : input + strlen(input);
 	size_t blen = (size_t)(base_end - input);
 	char* out = malloc(blen + 6); /* ".html" + '\0' */
@@ -403,6 +396,13 @@ static char* derive_output_name(const char* input)
 	memcpy(out, input, blen);
 	memcpy(out + blen, ".html", 6);
 	return out;
+}
+
+static int has_suffix(const char* s, const char* suffix)
+{
+	size_t n = strlen(s), k = strlen(suffix);
+
+	return n > k && !strcmp(s + n - k, suffix);
 }
 
 static int mkdir_p(const char* path)
@@ -539,7 +539,7 @@ static int walk_directory(const char* dir_path, const char* base_dir, int recurs
 		if(!S_ISREG(st.st_mode))
 			continue;
 
-		if(!strstr(ent->d_name, ".md") && !strstr(ent->d_name, ".markdown"))
+		if(!has_suffix(ent->d_name, ".md") && !has_suffix(ent->d_name, ".markdown"))
 			continue;
 
 		if(output_dir)
@@ -605,7 +605,7 @@ int main(int argc, char** argv)
 				verbose = 1;
 				break;
 			default:
-				usage(argv[0], stdout);
+				usage(argv[0], stderr);
 				return 1;
 		}
 	}
